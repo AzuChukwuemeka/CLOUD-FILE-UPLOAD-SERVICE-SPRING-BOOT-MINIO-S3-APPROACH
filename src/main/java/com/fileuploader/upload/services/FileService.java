@@ -1,53 +1,96 @@
 package com.fileuploader.upload.services;
 
-import com.fileuploader.upload.dataclasses.FileMetaData;
-import com.fileuploader.upload.repositories.FileRepositoryI;
-import com.fileuploader.upload.utils.BlobStoreHandler;
-import io.github.cdimascio.dotenv.Dotenv;
+import com.fileuploader.upload.config.MinioProperties;
+import com.fileuploader.upload.dto.FileMetadataResponse;
+import com.fileuploader.upload.entities.FileMetadata;
+import com.fileuploader.upload.exceptions.ResourceNotFoundException;
+import com.fileuploader.upload.exceptions.StorageException;
+import com.fileuploader.upload.repositories.FileMetadataRepository;
+import com.fileuploader.upload.services.storage.BlobStore;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.UUID;
 
 @Service
 public class FileService {
-    private final FileRepositoryI fileRepository;
-    private final Dotenv dotenv;
-    private final BlobStoreHandler minioblob;
-    public FileService(FileRepositoryI fileRepository, Dotenv dotenv, BlobStoreHandler minioblob) {
-        this.fileRepository = fileRepository;
-        this.dotenv = dotenv;
-        this.minioblob = minioblob;
-    }
-    public FileMetaData uploadFile(InputStream inputStream, String filename, String extension, String uploaded_by){
-        UUID file_id = UUID.randomUUID();
-        try(inputStream){
-            String file_name = filename.concat(file_id.toString()).concat(extension);
-            minioblob.uploadFile(dotenv.get("MY_BUCKET_NAME"), file_name, inputStream);
-            return fileRepository.createFileMetaData(file_id, filename, file_name, extension, uploaded_by);
-        }catch (Exception e) {
-            fileRepository.deleteFileById(file_id);
-            throw new RuntimeException(e);
-        }
-    }
-    public List<FileMetaData> getFilesForUser(String email){
-        return fileRepository.getFilesOwnedByUser(email);
-    }
-    public FileMetaData getFileMetaData(UUID id){
-        return fileRepository.getFileMetaData(id);
+
+    private final FileMetadataRepository fileMetadataRepository;
+    private final BlobStore blobStore;
+    private final MinioProperties minioProperties;
+
+    public FileService(FileMetadataRepository fileMetadataRepository, BlobStore blobStore, MinioProperties minioProperties) {
+        this.fileMetadataRepository = fileMetadataRepository;
+        this.blobStore = blobStore;
+        this.minioProperties = minioProperties;
     }
 
-    public void downloadFile(HttpServletResponse response, UUID id){
-        FileMetaData fileMetaData = fileRepository.getFileMetaData(id);
-        try (OutputStream response_data = response.getOutputStream()){
-            response.setContentType("application/octet-stream");
-            response.setHeader("Content-Disposition","attachment; filename=\"" + fileMetaData.getFile_name() + "\"");
-            minioblob.downloadFile(dotenv.get("MY_BUCKET_NAME"),fileMetaData.getFile_name(),response_data);
+    public FileMetadataResponse uploadFile(InputStream inputStream, String originalFilename, String contentType, long fileSize, String uploadedBy) {
+        UUID fileId = UUID.randomUUID();
+        String storedName = fileId + "-" + originalFilename;
+        try {
+            blobStore.uploadFile(minioProperties.getBucketName(), storedName, inputStream);
         } catch (Exception e) {
-            throw new RuntimeException("Error Trying To Download File");
+            throw new StorageException("Failed to upload file to object storage", e);
         }
-   }
+
+        FileMetadata metadata = new FileMetadata(fileId, originalFilename, storedName, contentType, fileSize, uploadedBy);
+        FileMetadata saved = fileMetadataRepository.save(metadata);
+        return toResponse(saved);
+    }
+
+    public List<FileMetadataResponse> getFilesForUser(String uploadedBy) {
+        return fileMetadataRepository.findByUploadedBy(uploadedBy).stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
+    public FileMetadataResponse getFileMetadata(UUID id, String requestingUser) {
+        return toResponse(getOwnedFileOrThrow(id, requestingUser));
+    }
+
+    public void downloadFile(UUID id, String requestingUser, HttpServletResponse response) {
+        FileMetadata metadata = getOwnedFileOrThrow(id, requestingUser);
+        try {
+            response.setContentType(metadata.getContentType());
+            response.setHeader("Content-Disposition", "attachment; filename=\"" + metadata.getFileName() + "\"");
+            blobStore.downloadFile(minioProperties.getBucketName(), metadata.getStoredName(), response.getOutputStream());
+        } catch (IOException e) {
+            throw new StorageException("Failed to stream file to the client", e);
+        } catch (Exception e) {
+            throw new StorageException("Failed to download file from object storage", e);
+        }
+    }
+
+    public void deleteFile(UUID id, String requestingUser) {
+        FileMetadata metadata = getOwnedFileOrThrow(id, requestingUser);
+        try {
+            blobStore.deleteFile(minioProperties.getBucketName(), metadata.getStoredName());
+        } catch (Exception e) {
+            throw new StorageException("Failed to delete file from object storage", e);
+        }
+        fileMetadataRepository.deleteById(id);
+    }
+
+    private FileMetadata getOwnedFileOrThrow(UUID id, String requestingUser) {
+        FileMetadata metadata = fileMetadataRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("No file found with id " + id));
+        if (!metadata.getUploadedBy().equals(requestingUser)) {
+            throw new ResourceNotFoundException("No file found with id " + id);
+        }
+        return metadata;
+    }
+
+    private FileMetadataResponse toResponse(FileMetadata metadata) {
+        return new FileMetadataResponse(
+                metadata.getId(),
+                metadata.getFileName(),
+                metadata.getContentType(),
+                metadata.getFileSize(),
+                metadata.getUploadedBy()
+        );
+    }
 }

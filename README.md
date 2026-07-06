@@ -1,111 +1,115 @@
-📁 File Upload Backend (MinIO + Spring Boot)
-This project provides a simple, S3-style backend for securely uploading, listing, and downloading files. It's designed to help developers learn and prototype file upload logic with a local MinIO container before moving to production blob storage solutions like AWS S3.
-🚀 Features
-Upload files via octet-stream (not multipart/form-data)
+# Cloud File Upload Service
 
-Download files using UUID-based access
+A Spring Boot backend for uploading, listing, downloading, and deleting files against an
+S3-compatible object store (MinIO), with per-user access control and file metadata persisted
+in an embedded H2 database. Interactive API documentation is generated automatically with
+springdoc-openapi.
 
-Retrieve file metadata
+## Features
 
-View all files uploaded by a user
+- Upload, list, download, and delete files, scoped to the authenticated user
+- HTTP Basic authentication with BCrypt-hashed passwords
+- S3-compatible object storage via MinIO (swap the endpoint for real AWS S3 with no code changes)
+- Embedded H2 database for file/user metadata — no external database to install
+- Interactive Swagger UI for exploring and testing every endpoint
+- Global error handling with consistent JSON error responses
+- Unit, web-layer (MockMvc), and repository (`@DataJpaTest`) test coverage
 
-Uses MinIO for local object storage (S3-compatible)
+## Tech stack
 
-Authenticated routes via HTTP Basic Auth
+Java 17, Spring Boot 3, Spring Security, Spring Data JPA, H2, MinIO Java SDK, springdoc-openapi.
 
-Uses Spring Boot and a custom blob handler
+## Running locally
 
-🏗️ Technologies Used
-Java + Spring Boot
+You need Docker (for MinIO) and a JDK 17+. A database is **not** required — H2 is embedded.
 
-MinIO (Docker container)
+1. Start MinIO:
 
-Dotenv for environment variable management
+   ```bash
+   docker compose up -d
+   ```
 
-HTTP Basic Authentication
+   This starts MinIO on `http://localhost:9000` (console at `http://localhost:9001`,
+   login `minioadmin` / `minioadmin123`).
 
-Stream-based upload/download (no multipart)
+2. Run the app:
 
-PostgreSQL or your DB of choice for metadata
+   ```bash
+   ./mvnw spring-boot:run
+   ```
 
-📦 API Endpoints
-All endpoints except user creation require authentication.
+   The app boots on `http://localhost:8080`. On first startup it creates the configured
+   MinIO bucket automatically. If MinIO isn't reachable yet, the app still starts — file
+   upload/download will simply fail until MinIO is available.
 
-🔐 Auth
-Uses HTTP Basic Auth (Authorization: Basic base64(username:password)).
+3. Open the API docs: **http://localhost:8080/swagger-ui.html**
 
-📤 Upload File
-POST /api/v1/file/uploadFile
-Headers:
+To point at a different MinIO endpoint/bucket (or real AWS S3), set the environment variables
+in `.env.example` before starting the app — no code changes needed.
 
-filename: Desired name of the file
+## Database
 
-file-extension: File extension (e.g., .jpg, .pdf)
-Body: Raw binary data (application/octet-stream)
+Metadata is stored in an embedded H2 database, written to `./data/uploaddb` by default so data
+survives restarts. To inspect it directly, use the H2 console at `http://localhost:8080/h2-console`
+with:
 
-Example:
+- JDBC URL: `jdbc:h2:file:./data/uploaddb;AUTO_SERVER=TRUE`
+- User: `sa`, no password
 
-bash
-curl -X POST http://localhost:8080/api/v1/file/uploadFile \
-  -H "filename: document" \
-  -H "file-extension: .pdf" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary "@path/to/document.pdf" \
-  -u user@example.com:password123
-📥 Download File
-GET /api/v1/file/files/{id}
-Downloads a file by its UUID.
-Returns the file as a binary stream.
+## API overview
 
-🧾 Get File Metadata
-GET /api/v1/file/files/{id}
-Returns metadata about the file (name, type, size, etc.)
+All endpoints require HTTP Basic auth except registration.
 
-📚 List User Files
-GET /api/v1/file/files/{email}
-Lists all files uploaded by the authenticated user.
+| Method | Path                           | Description                            |
+|--------|--------------------------------|-----------------------------------------|
+| POST   | `/api/v1/users/register`       | Register a new user (public)            |
+| POST   | `/api/v1/files`                 | Upload a file (`multipart/form-data`)   |
+| GET    | `/api/v1/files`                  | List the authenticated user's files     |
+| GET    | `/api/v1/files/{id}`             | Get metadata for one file               |
+| GET    | `/api/v1/files/{id}/download`    | Download a file's content               |
+| DELETE | `/api/v1/files/{id}`             | Delete a file                           |
 
-👤 User Creation
-There is a separate controller to register users. Once created, all file endpoints require authentication. Only the authenticated user can see or manage their own files.
+### Example: register + upload
 
-⚙️ Running Locally
-Start MinIO via Docker:
+```bash
+curl -X POST http://localhost:8080/api/v1/users/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"supersecret"}'
 
-bash
-docker run -p 9000:9000 -p 9001:9001 \
-  -e "MINIO_ROOT_USER=minioadmin" \
-  -e "MINIO_ROOT_PASSWORD=minioadmin123" \
-  quay.io/minio/minio server /data --console-address ":9001"
-Set up .env file:
+curl -X POST http://localhost:8080/api/v1/files \
+  -u user@example.com:supersecret \
+  -F "file=@/path/to/document.pdf"
+```
 
-ini
-MINIO_ENDPOINT=http://localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-BUCKET_NAME=your-bucket-name
-Run the Spring Boot app:
+Full request/response schemas are available in Swagger UI, or as raw OpenAPI JSON at
+`/v3/api-docs`.
 
-bash
-./gradlew bootRun
-or
+## Running tests
 
-bash
-mvn spring-boot:run
-📁 Project Structure
-bash
-└── com.fileuploader.upload
-    ├── controllers         # FileUploadController & UserController
-    ├── services            # Business logic for storing and retrieving files
-    ├── dataclasses         # File metadata class
-    ├── utils               # BlobStoreHandler for MinIO/S3 interaction
-🧠 Learning Goals
-This project is meant as a learning tool and prototype. It helps you:
+```bash
+./mvnw test
+```
 
-Understand blob storage interactions using a local setup
+Tests run against an in-memory H2 database and never touch a real MinIO instance
+(the MinIO bucket bootstrap step is disabled under the `test` profile).
 
-Implement stream-based file handling in Java
+## Project structure
 
-Get ready for AWS S3 migration by working with MinIO
+```
+com.fileuploader.upload
+├── config          # Security, MinIO client, OpenAPI configuration
+├── controllers     # REST controllers
+├── dto             # Request/response records
+├── entities        # JPA entities
+├── exceptions      # Custom exceptions + global @RestControllerAdvice
+├── init            # Startup bucket bootstrap
+├── repositories    # Spring Data JPA repositories
+├── security        # UserDetailsService implementation
+└── services        # Business logic (user + file services, blob storage abstraction)
+```
 
-Explore authentication and metadata separation
+## Deploying
 
+The included `Dockerfile` builds a self-contained image (multi-stage build, non-root user).
+MinIO/S3 credentials and the bucket name are the only required runtime configuration
+(see `.env.example`); the database needs no setup since it's embedded.
